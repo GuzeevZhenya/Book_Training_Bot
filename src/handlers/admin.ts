@@ -24,6 +24,11 @@ async function mainKb(ctx: BotContext) {
 
 adminHandler.command("admin", async (ctx) => {
   if (!(await requireAdmin(ctx))) return;
+  try {
+    await ctx.conversation.exitAll();
+  } catch {
+    /* ok */
+  }
   await ctx.reply("🛠 Админ-панель:", {
     reply_markup: adminMenuKeyboard(),
   });
@@ -57,10 +62,16 @@ async function sendBookings(ctx: BotContext): Promise<void> {
       }
       const people: string[] = [];
       if (b.clientName || b.clientContact) {
-        people.push(`${b.clientName || "—"} (${b.clientContact || "—"})`);
+        people.push(
+          `${b.clientName || "—"} (${b.clientContact || "—"})` +
+            (b.health1?.trim() ? ` ⚠️ ${b.health1.trim()}` : ""),
+        );
       }
       if (b.clientName2 || b.clientContact2) {
-        people.push(`${b.clientName2 || "—"} (${b.clientContact2 || "—"})`);
+        people.push(
+          `${b.clientName2 || "—"} (${b.clientContact2 || "—"})` +
+            (b.health2?.trim() ? ` ⚠️ ${b.health2.trim()}` : ""),
+        );
       }
       lines.push(
         `• ${b.time} | ${b.worker} | ${b.service || "—"} ` +
@@ -108,6 +119,7 @@ async function showTrainerCard(ctx: BotContext, index: number): Promise<void> {
   await ctx.reply(`👤 ${w.name}${tg}${linkLine}\n\nЧто сделать?`, {
     reply_markup: trainerCardKeyboard(index, url),
     link_preview_options: { is_disabled: true },
+
   });
 }
 
@@ -221,9 +233,15 @@ adminHandler.callbackQuery(/^admin:tr:(\d+):clients$/, async (ctx) => {
     lines.push(`🗓 ${b.date} ${b.time}${b.service ? ` · ${b.service}` : ""}`);
     if (b.clientName || b.clientContact) {
       lines.push(`  1) ${b.clientName || "—"} · ${b.clientContact || "—"}`);
+      if (b.health1?.trim()) {
+        lines.push(`     ⚠️ ${b.health1.trim()}`);
+      }
     }
     if (b.clientName2 || b.clientContact2) {
       lines.push(`  2) ${b.clientName2 || "—"} · ${b.clientContact2 || "—"}`);
+      if (b.health2?.trim()) {
+        lines.push(`     ⚠️ ${b.health2.trim()}`);
+      }
     }
   }
   await ctx.reply(lines.join("\n"));
@@ -342,6 +360,7 @@ adminHandler.callbackQuery(/^admin:tr:(\d+):sheet$/, async (ctx) => {
     await ctx.reply(`📄 Лист «${w.name}» готов:\n${url}`, {
       reply_markup: trainerCardKeyboard(index, url),
       link_preview_options: { is_disabled: true },
+
     });
   } catch (err) {
     await ctx.reply(err instanceof Error ? err.message : "Ошибка");
@@ -418,7 +437,7 @@ adminHandler.callbackQuery("admin:reset_schedule", async (ctx) => {
   }
   await ctx.answerCallbackQuery();
   try {
-    await googleSheets.resetSchedule();
+    await googleSheets.clearScheduleAndBookings();
     await ctx.reply(
       "🧹 Расписание очищено, шапка A–J восстановлена.\n" +
         "Дальше: Тренеры → расписать неделю (или Демо-данные).",
@@ -437,19 +456,23 @@ export async function addWorkerConversation(
   const name = nameCtx.message.text.trim();
 
   await ctx.reply(
-    "Telegram username тренера (без @), чтобы у него появилась кнопка «Клиенты».\n" +
-      "Или напишите «-» чтобы пропустить:",
+    "Telegram-тег тренера (например Guzeev_96 или @Guzeev_96).\n" +
+      "По нему проверяется уникальность и появляется кнопка «Клиенты».\n" +
+      "Или «-», чтобы пропустить:",
   );
   const tgCtx = await conversation.waitFor("message:text");
   const tgRaw = tgCtx.message.text.trim();
   const telegram = tgRaw === "-" ? "" : tgRaw;
 
   try {
-    await conversation.external(() => googleSheets.addWorker(name, telegram));
+    const worker = await conversation.external(() =>
+      googleSheets.addWorker(name, telegram),
+    );
+    const tag = worker.telegram ? ` (@${worker.telegram})` : "";
     await ctx.reply(
-      `✅ Тренер «${name}» добавлен` +
-        (telegram ? ` (@${telegram.replace(/^@/, "")})` : "") +
-        ".",
+      worker.updated
+        ? `✅ Тренер «${worker.name}» обновлён${tag}.`
+        : `✅ Тренер «${worker.name}» добавлен${tag}.`,
     );
   } catch (err) {
     await ctx.reply(err instanceof Error ? err.message : "Ошибка");

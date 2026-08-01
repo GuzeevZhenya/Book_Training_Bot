@@ -31,8 +31,22 @@ export interface Slot {
   clientName2: string;
   clientContact2: string;
   note: string;
+  /** Проблемы со здоровьем клиента на месте 1 */
+  health1: string;
+  /** Проблемы со здоровьем клиента на месте 2 */
+  health2: string;
   bookedCount: number;
   freeSeats: number;
+}
+
+export interface ClientProfile {
+  rowIndex: number;
+  telegramId: string;
+  name: string;
+  phone: string;
+  username: string;
+  healthIssues: string;
+  updatedAt: string;
 }
 
 export interface SessionData {

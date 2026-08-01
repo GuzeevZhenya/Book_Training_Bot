@@ -4,6 +4,7 @@ import type { Service, Slot, Worker } from "../types.js";
 export const BTN_BOOK = "📅 Записаться";
 export const BTN_MY = "📋 Мои записи";
 export const BTN_PROFILE = "👤 Мои данные";
+export const BTN_HEALTH = "🩺 Здоровье";
 export const BTN_INFO = "ℹ️ Информация";
 export const BTN_CANCEL = "❌ Отменить запись";
 export const BTN_ADMIN = "🛠 Админ-панель";
@@ -18,8 +19,9 @@ export function clientMainKeyboard(options?: {
     .text(BTN_MY)
     .row()
     .text(BTN_PROFILE)
-    .text(BTN_CANCEL)
+    .text(BTN_HEALTH)
     .row()
+    .text(BTN_CANCEL)
     .text(BTN_INFO);
 
   if (options?.trainerName) {
@@ -81,5 +83,15 @@ export function timesKeyboard(slots: Slot[]): InlineKeyboard {
   if (slots.length % 2 === 1) kb.row();
   kb.text("« Назад", "wiz:back:date").row();
   kb.text("« Отмена", "wiz:cancel");
+  return kb;
+}
+
+export function healthActionsKeyboard(hasIssues: boolean): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  kb.text(hasIssues ? "✏️ Изменить" : "➕ Указать", "health:edit").row();
+  if (hasIssues) {
+    kb.text("🗑 Очистить", "health:clear").row();
+  }
+  kb.text("« Готово", "health:done");
   return kb;
 }

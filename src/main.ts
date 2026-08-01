@@ -6,8 +6,8 @@ import {
 import { config } from "./config.js";
 import type { BotContext } from "./context.js";
 import type { SessionData } from "./types.js";
-import { startHandler } from "./handlers/start.js";
-import { bookingHandler, bookingWizard } from "./handlers/booking.js";
+import { startHandler, onboardingWizard } from "./handlers/start.js";
+import { bookingHandler, bookingWizard, healthWizard } from "./handlers/booking.js";
 import { cancelHandler } from "./handlers/cancel.js";
 import {
   adminHandler,
@@ -29,7 +29,9 @@ async function main(): Promise<void> {
 
   bot.use(session({ initial: initialSession }));
   bot.use(conversations());
+  bot.use(createConversation(onboardingWizard, "onboardingWizard"));
   bot.use(createConversation(bookingWizard, "bookingWizard"));
+  bot.use(createConversation(healthWizard, "healthWizard"));
   bot.use(createConversation(addWorkerConversation, "addWorker"));
   bot.use(createConversation(addServiceConversation, "addService"));
   bot.use(createConversation(delServiceConversation, "delService"));

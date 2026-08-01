@@ -6,20 +6,30 @@ import {
   BTN_ADMIN,
   BTN_BOOK,
   BTN_CANCEL,
+  BTN_HEALTH,
   BTN_INFO,
   BTN_MY,
   BTN_PROFILE,
   BTN_TRAINER_CLIENTS_PREFIX,
   clientMainKeyboard,
   datesKeyboard,
+  healthActionsKeyboard,
   servicesKeyboard,
   timesKeyboard,
   workersKeyboard,
 } from "../keyboards/client.js";
 import { adminMenuKeyboard } from "../keyboards/admin.js";
 import { SlotAlreadyBookedError, SlotNotFoundError } from "../types.js";
+import { loadClientSession } from "./start.js";
 
-export const bookingHandler = new Composer<BotContext>();
+function isQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes("Quota exceeded") ||
+    msg.includes("rateLimitExceeded") ||
+    msg.includes("429")
+  );
+}
 
 async function replyKeyboard(ctx: BotContext) {
   const trainer = await googleSheets.findWorkerByTelegram(ctx.from?.username);
@@ -29,11 +39,30 @@ async function replyKeyboard(ctx: BotContext) {
   });
 }
 
+function tgTag(username?: string | null): string {
+  if (!username) return "";
+  return username.startsWith("@") ? username : `@${username}`;
+}
+
+export const bookingHandler = new Composer<BotContext>();
+
 bookingHandler.command("book", async (ctx) => {
+  const ready = await loadClientSession(ctx).catch(() => false);
+  if (!ready) {
+    await ctx.reply("Сначала заполните профиль — нажмите /start");
+    await ctx.conversation.enter("onboardingWizard");
+    return;
+  }
   await ctx.conversation.enter("bookingWizard");
 });
 
 bookingHandler.hears(BTN_BOOK, async (ctx) => {
+  const ready = await loadClientSession(ctx).catch(() => false);
+  if (!ready) {
+    await ctx.reply("Сначала заполните профиль — нажмите /start");
+    await ctx.conversation.enter("onboardingWizard");
+    return;
+  }
   await ctx.conversation.enter("bookingWizard");
 });
 
@@ -41,6 +70,11 @@ bookingHandler.hears(BTN_ADMIN, async (ctx) => {
   if (!isAdmin(ctx)) {
     await ctx.reply("Админ-панель доступна только администраторам.");
     return;
+  }
+  try {
+    await ctx.conversation.exitAll();
+  } catch {
+    /* нет активного диалога */
   }
   await ctx.reply("🛠 Админ-панель:", {
     reply_markup: adminMenuKeyboard(),
@@ -51,49 +85,75 @@ bookingHandler.hears(BTN_INFO, async (ctx) => {
   await ctx.reply(
     "ℹ️ Запись на тренировки\n\n" +
       "1. Выберите тренера\n" +
-      "2. Выберите день и время из свободных\n" +
-      "3. Выберите направление (услугу)\n" +
-      "4. Укажите имя и телефон\n\n" +
-      "На один слот — до 2 человек, шаг между слотами 1.5 часа.",
+      "2. Выберите день и время\n" +
+      "3. Выберите направление (услугу)\n\n" +
+      "Имя и Telegram берутся из вашего профиля (заполняется при первом /start).\n\n" +
+      "🩺 В «Здоровье» можно указать проблемы (спина, колени и т.п.) — " +
+      "тренер увидит их в таблице при каждой записи.",
     { reply_markup: await replyKeyboard(ctx) },
   );
 });
 
 bookingHandler.hears(BTN_PROFILE, async (ctx) => {
+  await loadClientSession(ctx).catch(console.error);
   const name = ctx.session.clientName || "не указано";
-  const phone = ctx.session.clientPhone || "не указан";
+  const tag =
+    tgTag(ctx.from?.username) || ctx.session.clientPhone || "не указан";
+  let health = "не указаны";
+  try {
+    if (ctx.from?.id) {
+      const profile = await googleSheets.getClientProfile(ctx.from.id);
+      if (profile?.healthIssues?.trim()) {
+        health = profile.healthIssues.trim();
+      }
+      if (profile?.name?.trim()) {
+        ctx.session.clientName = profile.name.trim();
+      }
+    }
+  } catch (err) {
+    console.error(err);
+  }
   await ctx.reply(
-    `👤 Ваши данные:\nИмя: ${name}\nКонтакт: ${phone}\n\n` +
-      "Имя используется в «Мои записи».",
+    `👤 Ваши данные:\nИмя: ${ctx.session.clientName || name}\n` +
+      `Telegram: ${tag}\n` +
+      `Проблемы со здоровьем: ${health}\n\n` +
+      "Изменить здоровье — «🩺 Здоровье».",
   );
+});
+
+bookingHandler.hears(BTN_HEALTH, async (ctx) => {
+  await ctx.conversation.enter("healthWizard");
 });
 
 bookingHandler.hears(BTN_MY, async (ctx) => {
   const phone = ctx.session.clientPhone;
   const username = ctx.from?.username ? `@${ctx.from.username}` : undefined;
-  const name = ctx.session.clientName;
   const tgId = ctx.from?.id;
+  const myName = ctx.session.clientName;
 
   try {
+    // Сначала строго по Telegram ID, контакт — запасной
     const list = await googleSheets.listUserBookings(
       phone || username,
-      name,
+      undefined,
       tgId,
     );
     if (list.length === 0) {
       await ctx.reply(
         "У вас нет активных записей.\n" +
-          "Если записывались — укажите то же имя в профиле (запишитесь ещё раз).",
+          "Запишитесь через «📅 Записаться» — тогда они появятся здесь.",
       );
       return;
     }
+    const who = myName ? ` (${myName})` : "";
     const lines = list.map(
       (s) =>
-        `• ${s.displayName}: ${s.date} ${s.time}` +
+        `• ${s.date} в ${s.time}` +
         `\n  Тренер: ${s.worker || "—"}` +
-        (s.service ? ` · ${s.service}` : ""),
+        (s.service ? ` · ${s.service}` : "") +
+        `\n  Имя в записи: ${s.displayName}`,
     );
-    await ctx.reply(`📋 Ваши записи:\n\n${lines.join("\n\n")}`);
+    await ctx.reply(`📋 Ваши записи${who}:\n\n${lines.join("\n\n")}`);
   } catch (err) {
     console.error(err);
     await ctx.reply("Не удалось загрузить записи.");
@@ -125,9 +185,15 @@ bookingHandler.hears(new RegExp(`^${BTN_TRAINER_CLIENTS_PREFIX}\\s+(.+)$`), asyn
       lines.push(`🗓 ${b.date} ${b.time}${b.service ? ` · ${b.service}` : ""}`);
       if (b.clientName || b.clientContact) {
         lines.push(`  1) ${b.clientName || "—"} · ${b.clientContact || "—"}`);
+        if (b.health1?.trim()) {
+          lines.push(`     ⚠️ ${b.health1.trim()}`);
+        }
       }
       if (b.clientName2 || b.clientContact2) {
         lines.push(`  2) ${b.clientName2 || "—"} · ${b.clientContact2 || "—"}`);
+        if (b.health2?.trim()) {
+          lines.push(`     ⚠️ ${b.health2.trim()}`);
+        }
       }
     }
     await ctx.reply(lines.join("\n"));
@@ -162,6 +228,7 @@ async function cancelFlow(ctx: BotContext): Promise<void> {
       slot.time,
       slot.worker,
       contactInSheet || contact,
+      tgId,
     );
     await ctx.reply(
       `Запись отменена: ${slot.date} в ${slot.time} (${slot.worker})`,
@@ -175,12 +242,20 @@ async function cancelFlow(ctx: BotContext): Promise<void> {
 }
 
 /**
- * Клиент: тренер → день → время → услуга → имя/телефон
+ * Клиент: тренер → день → время → услуга (имя и @username из профиля)
  */
 export async function bookingWizard(
   conversation: BotConversation,
   ctx: BotContext,
 ): Promise<void> {
+  const profileReady = await conversation.external(async (c) =>
+    loadClientSession(c),
+  );
+  if (!profileReady) {
+    await ctx.reply("Сначала заполните профиль — нажмите /start");
+    return;
+  }
+
   const workers = await conversation.external(() =>
     googleSheets.listWorkers(true),
   );
@@ -241,7 +316,7 @@ export async function bookingWizard(
       );
       if (dates.length === 0) {
         await ctx.reply(
-          `У «${workerName}» нет свободных слотов.\nАдмин может расписать день/неделю в админ-панели.`,
+          `У «${workerName}» нет свободного времени.`,
         );
         return;
       }
@@ -383,47 +458,36 @@ export async function bookingWizard(
     serviceName ||
     "Тренировка";
 
-  let name = await conversation.external((c) => c.session.clientName);
-  let phone = await conversation.external((c) => c.session.clientPhone);
+  const name = await conversation.external((c) => c.session.clientName?.trim());
+  const username = await conversation.external((c) => c.from?.username);
+  const contact =
+    (await conversation.external((c) => {
+      const tag = tgTag(c.from?.username);
+      if (tag) {
+        c.session.clientPhone = tag;
+        return tag;
+      }
+      return c.session.clientPhone?.trim() || "";
+    })) || "";
 
   if (!name) {
-    await ctx.reply("Как вас зовут? (это имя будет в «Мои записи»)");
-    const nameCtx = await conversation.waitFor("message:text");
-    name = nameCtx.message.text.trim();
-    if (!name) {
-      await ctx.reply("Имя пустое. Начните запись заново.");
-      return;
-    }
-    await conversation.external((c) => {
-      c.session.clientName = name;
-    });
-  }
-
-  if (!phone) {
-    await ctx.reply("Укажите телефон или @username:");
-    const phoneCtx = await conversation.waitFor("message:text");
-    phone = phoneCtx.message.text.trim();
-    if (!phone) {
-      await ctx.reply("Контакт пустой. Начните запись заново.");
-      return;
-    }
-    await conversation.external((c) => {
-      c.session.clientPhone = phone;
-    });
+    await ctx.reply("Сначала заполните профиль — нажмите /start");
+    return;
   }
 
   const tgId = await conversation.external((c) => c.from?.id);
 
   try {
-    const booked = await conversation.external(() =>
+    await conversation.external(() =>
       googleSheets.bookSlot(
         date,
         time,
         workerName,
         serviceName,
-        name!,
-        phone!,
+        name,
+        contact || tgTag(username) || name,
         tgId,
+        username,
       ),
     );
     await conversation.external((c) => {
@@ -441,26 +505,136 @@ export async function bookingWizard(
       });
     });
 
+    const health =
+      (await conversation.external(() =>
+        tgId ? googleSheets.getClientProfile(tgId) : Promise.resolve(null),
+      ))?.healthIssues?.trim() || "";
+
     await ctx.reply(
       `✅ ${name}, вы записаны!\n\n` +
         `Тренер: ${workerName}\n` +
         `Услуга: ${serviceName}\n` +
-        `Когда: ${date} в ${time}\n` +
-        (booked.freeSeats > 0
-          ? `Осталось мест: ${booked.freeSeats}`
-          : "Слот полностью занят"),
+        `Когда: ${date} в ${time}` +
+        (health ? `\n\n⚠️ Для тренера отмечено:\n${health}` : ""),
       { reply_markup: kb },
     );
   } catch (err) {
     if (err instanceof SlotAlreadyBookedError) {
-      await ctx.reply("Мест больше нет — выберите другой слот.");
+      await ctx.reply("Мест больше нет — выберите другое время.");
       return;
     }
     if (err instanceof SlotNotFoundError) {
-      await ctx.reply("Слот не найден. Попробуйте снова.");
+      await ctx.reply("Это время уже недоступно. Попробуйте снова.");
       return;
     }
     console.error(err);
-    await ctx.reply("Не удалось записаться. Попробуйте позже.");
+    await ctx.reply(
+      isQuotaError(err)
+        ? "Сейчас много запросов к таблице. Подождите ~1 минуту и попробуйте снова."
+        : err instanceof Error && err.message.includes("уже записаны")
+          ? err.message
+          : "Не удалось записаться. Попробуйте позже.",
+    );
+  }
+}
+
+/**
+ * Клиент указывает / редактирует проблемы со здоровьем
+ */
+export async function healthWizard(
+  conversation: BotConversation,
+  ctx: BotContext,
+): Promise<void> {
+  const tgId = await conversation.external((c) => c.from?.id);
+  if (!tgId) {
+    await ctx.reply("Не удалось определить аккаунт Telegram.");
+    return;
+  }
+
+  const mainKb = async () =>
+    conversation.external(async (c) => {
+      const trainer = await googleSheets.findWorkerByTelegram(c.from?.username);
+      return clientMainKeyboard({
+        isAdmin: isAdmin(c),
+        trainerName: trainer?.name,
+      });
+    });
+
+  const loadIssues = () =>
+    conversation.external(async () => {
+      const p = await googleSheets.getClientProfile(tgId);
+      return p?.healthIssues?.trim() || "";
+    });
+
+  let current = await loadIssues();
+  await ctx.reply(
+    current
+      ? `🩺 Ваши проблемы со здоровьем:\n\n${current}\n\n` +
+          "Тренер видит это в Google Sheet при каждой вашей записи."
+      : "🩺 Проблемы со здоровьем пока не указаны.\n\n" +
+          "Напишите, что важно знать тренеру (например: проблемы со спиной, колени, давление).",
+    { reply_markup: healthActionsKeyboard(Boolean(current)) },
+  );
+
+  while (true) {
+    const cbCtx = await conversation.waitFor("callback_query:data");
+    const data = cbCtx.callbackQuery.data;
+    await cbCtx.answerCallbackQuery();
+
+    if (data === "health:done") {
+      await ctx.reply("Готово.", { reply_markup: await mainKb() });
+      return;
+    }
+
+    if (data === "health:clear") {
+      await conversation.external(async (c) =>
+        googleSheets.setHealthIssues(tgId, "", {
+          name: c.session.clientName,
+          phone: c.session.clientPhone,
+          username: c.from?.username,
+        }),
+      );
+      await ctx.reply(
+        "Проблемы со здоровьем очищены. В будущих записях пометка снята.",
+        { reply_markup: await mainKb() },
+      );
+      return;
+    }
+
+    if (data === "health:edit") {
+      await ctx.reply(
+        "Напишите проблемы одним сообщением.\n" +
+          "Чтобы очистить — отправьте «-».",
+      );
+      const msgCtx = await conversation.waitFor("message:text");
+      const raw = msgCtx.message.text.trim();
+      const issues =
+        raw === "-" || raw.toLowerCase() === "очистить" ? "" : raw;
+
+      if (issues.length > 500) {
+        await ctx.reply(
+          "Слишком длинный текст (макс. 500 символов). Попробуйте короче:",
+          { reply_markup: healthActionsKeyboard(Boolean(current)) },
+        );
+        continue;
+      }
+
+      await conversation.external(async (c) =>
+        googleSheets.setHealthIssues(tgId, issues, {
+          name: c.session.clientName,
+          phone: c.session.clientPhone,
+          username: c.from?.username,
+        }),
+      );
+
+      current = issues;
+      await ctx.reply(
+        issues
+          ? `✅ Сохранено:\n${issues}\n\nПри записи это попадёт в колонки «Здоровье» таблицы.`
+          : "Проблемы со здоровьем очищены.",
+        { reply_markup: await mainKb() },
+      );
+      return;
+    }
   }
 }

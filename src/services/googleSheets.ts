@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { google, sheets_v4 } from "googleapis";
 import { config } from "../config.js";
 import {
+  ClientProfile,
   Service,
   Slot,
   SlotAlreadyBookedError,
@@ -16,17 +17,20 @@ const STATUS_BUSY: SlotStatus = "Занято";
 
 const SHEET_WORKERS = "Работники";
 const SHEET_SERVICES = "Услуги";
+const SHEET_CLIENTS = "Клиенты";
 const SHEET_SCHEDULE = config.sheetName || "Расписание";
 
-/** Расписание: Дата, Время, Работник, Услуга, Статус, Имя1, Тел1, Имя2, Тел2, Примечание */
-const SCHEDULE_RANGE = `'${SHEET_SCHEDULE}'!A:J`;
+/** Расписание A–L (+ здоровье) */
+const SCHEDULE_RANGE = `'${SHEET_SCHEDULE}'!A:L`;
 const WORKERS_RANGE = `'${SHEET_WORKERS}'!A:D`;
 const SERVICES_RANGE = `'${SHEET_SERVICES}'!A:D`;
+const CLIENTS_RANGE = `'${SHEET_CLIENTS}'!A:F`;
 
 const RESERVED_SHEETS = new Set([
   SHEET_SCHEDULE,
   SHEET_WORKERS,
   SHEET_SERVICES,
+  SHEET_CLIENTS,
   "Sheet1",
   "Лист1",
 ]);
@@ -42,6 +46,8 @@ const SCHEDULE_HEADER = [
   "Имя 2",
   "Телефон 2",
   "Примечание",
+  "Здоровье 1",
+  "Здоровье 2",
 ];
 
 function cellRange(
@@ -87,12 +93,14 @@ function normalizeDateCell(raw: unknown): string {
     return "";
   }
   const s = String(raw).trim();
+  // строки-разделители из UI-таблицы Google («Дата: 06.08.2026»)
+  if (/^дата\s*:/i.test(s)) return "";
   if (/^\d{2}\.\d{2}\.\d{4}$/.test(s)) return s;
   const asNum = Number(s.replace(",", "."));
   if (Number.isFinite(asNum) && asNum > 1000 && !s.includes(":")) {
     return serialToDateString(asNum);
   }
-  return fromSheetText(s);
+  return "";
 }
 
 /** Нормализация ячейки времени */
@@ -211,6 +219,8 @@ function rowToSlot(row: unknown[], rowIndex: number): Slot | null {
   const clientName2 = fromSheetText(String(row[7] ?? ""));
   const clientContact2 = fromSheetText(String(row[8] ?? ""));
   const note = fromSheetText(String(row[9] ?? ""));
+  const health1 = fromSheetText(String(row[10] ?? ""));
+  const health2 = fromSheetText(String(row[11] ?? ""));
 
   let bookedCount = 0;
   if (clientName || clientContact) bookedCount += 1;
@@ -229,6 +239,8 @@ function rowToSlot(row: unknown[], rowIndex: number): Slot | null {
     clientName2,
     clientContact2,
     note,
+    health1,
+    health2,
     bookedCount,
     freeSeats: config.slotCapacity - bookedCount,
   };
@@ -246,6 +258,8 @@ function scheduleRowValues(parts: {
   name2?: string;
   phone2?: string;
   note?: string;
+  health1?: string;
+  health2?: string;
 }): string[] {
   return [
     parts.date,
@@ -258,6 +272,8 @@ function scheduleRowValues(parts: {
     parts.name2 ?? "",
     parts.phone2 ?? "",
     parts.note ?? "",
+    parts.health1 ?? "",
+    parts.health2 ?? "",
   ];
 }
 
@@ -266,6 +282,87 @@ function contactsMatch(a: string, b: string): boolean {
   const nb = b.trim().toLowerCase().replace(/^@/, "").replace(/^\+/, "");
   if (!na || !nb) return false;
   return na === nb || a.trim() === b.trim();
+}
+
+/** tg1:ID / tg2:ID (+ legacy tg:ID по порядку мест) */
+function parseSeatTelegramIds(note: string): { seat1?: string; seat2?: string } {
+  const parts = note
+    .split("|")
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  let seat1: string | undefined;
+  let seat2: string | undefined;
+  const legacy: string[] = [];
+
+  for (const p of parts) {
+    const m1 = /^tg1:(\d+)$/.exec(p);
+    const m2 = /^tg2:(\d+)$/.exec(p);
+    const ml = /^tg:(\d+)$/.exec(p);
+    if (m1) seat1 = m1[1];
+    else if (m2) seat2 = m2[1];
+    else if (ml) legacy.push(ml[1]!);
+  }
+
+  if (!seat1 && legacy[0]) seat1 = legacy[0];
+  if (!seat2 && legacy[1]) seat2 = legacy[1];
+  // один legacy tg и занято только место 2
+  if (!seat2 && legacy[0] && !seat1) seat1 = legacy[0];
+
+  return { seat1, seat2 };
+}
+
+function buildNoteWithSeats(
+  existingNote: string,
+  seat: 1 | 2,
+  telegramId?: number,
+): string {
+  const ids = parseSeatTelegramIds(existingNote);
+  if (seat === 1 && telegramId) ids.seat1 = String(telegramId);
+  if (seat === 2 && telegramId) ids.seat2 = String(telegramId);
+
+  const parts: string[] = [];
+  if (ids.seat1) parts.push(`tg1:${ids.seat1}`);
+  if (ids.seat2) parts.push(`tg2:${ids.seat2}`);
+  return parts.join(" | ");
+}
+
+function clearSeatFromNote(note: string, seat: 1 | 2): string {
+  const ids = parseSeatTelegramIds(note);
+  if (seat === 1) {
+    // после отмены место1 ← данные места2
+    ids.seat1 = ids.seat2;
+    ids.seat2 = undefined;
+  } else {
+    ids.seat2 = undefined;
+  }
+  const parts: string[] = [];
+  if (ids.seat1) parts.push(`tg1:${ids.seat1}`);
+  if (ids.seat2) parts.push(`tg2:${ids.seat2}`);
+  return parts.join(" | ");
+}
+
+function nowInTimezone(): Date {
+  return new Date(
+    new Date().toLocaleString("en-US", { timeZone: config.timezone }),
+  );
+}
+
+function slotDateTime(dateStr: string, timeStr: string): Date | null {
+  const d = parseSheetDate(dateStr);
+  if (!d) return null;
+  const t = normalizeTime(timeStr);
+  const tm = /^(\d{2}):(\d{2})$/.exec(t);
+  if (!tm) return null;
+  const result = new Date(d);
+  result.setHours(Number(tm[1]), Number(tm[2]), 0, 0);
+  return result;
+}
+
+function isSlotInPast(dateStr: string, timeStr: string): boolean {
+  const dt = slotDateTime(dateStr, timeStr);
+  if (!dt) return false;
+  return dt.getTime() < nowInTimezone().getTime();
 }
 
 /** Имя вкладки для тренера (ограничения Google Sheets) */
@@ -301,6 +398,27 @@ const DEMO_SERVICES: Array<[string, number, number]> = [
 export class GoogleSheetsService {
   private sheets: sheets_v4.Sheets | null = null;
 
+  /** Кэш метаданных листов (titles), чтобы не дергать spreadsheets.get на каждый вызов */
+  private sheetTitlesCache: { at: number; titles: Set<string> } | null = null;
+  private structureReadyAt = 0;
+  private slotsCache: { at: number; slots: Slot[] } | null = null;
+  private lastPastCleanupAt = 0;
+  private clientsCache: { at: number; rows: ClientProfile[] } | null = null;
+
+  private static STRUCTURE_TTL_MS = 10 * 60_000;
+  private static META_TTL_MS = 5 * 60_000;
+  private static SLOTS_TTL_MS = 20_000;
+  private static CLIENTS_TTL_MS = 30_000;
+  private static PAST_CLEANUP_TTL_MS = 5 * 60_000;
+
+  private invalidateSlotsCache(): void {
+    this.slotsCache = null;
+  }
+
+  private invalidateClientsCache(): void {
+    this.clientsCache = null;
+  }
+
   private async getClient(): Promise<sheets_v4.Sheets> {
     if (this.sheets) return this.sheets;
 
@@ -315,6 +433,29 @@ export class GoogleSheetsService {
 
     this.sheets = google.sheets({ version: "v4", auth });
     return this.sheets;
+  }
+
+  private async getSheetTitles(force = false): Promise<Set<string>> {
+    const now = Date.now();
+    if (
+      !force &&
+      this.sheetTitlesCache &&
+      now - this.sheetTitlesCache.at < GoogleSheetsService.META_TTL_MS
+    ) {
+      return this.sheetTitlesCache.titles;
+    }
+    const sheets = await this.getClient();
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: config.spreadsheetId,
+      fields: "sheets.properties.title",
+    });
+    const titles = new Set(
+      (meta.data.sheets ?? [])
+        .map((s) => s.properties?.title)
+        .filter((t): t is string => Boolean(t)),
+    );
+    this.sheetTitlesCache = { at: now, titles };
+    return titles;
   }
 
   private async getSheetIdByTitle(title: string): Promise<number> {
@@ -368,6 +509,8 @@ export class GoogleSheetsService {
           name2: fromSheetText(String(row[7] ?? "")),
           phone2: fromSheetText(String(row[8] ?? "")),
           note: fromSheetText(String(row[9] ?? "")),
+          health1: fromSheetText(String(row[10] ?? "")),
+          health2: fromSheetText(String(row[11] ?? "")),
         }),
       );
     }
@@ -385,8 +528,28 @@ export class GoogleSheetsService {
     });
 
     await this.applyScheduleStyles(sheetId);
+    await this.normalizeBookingNotes().catch(console.error);
     await this.syncAllTrainerSheets().catch(console.error);
     return out.length - 1;
+  }
+
+  /** Приводит Примечание к виду tg1:ID | tg2:ID */
+  async normalizeBookingNotes(): Promise<number> {
+    const slots = await this.readAllSlots();
+    let fixed = 0;
+    for (const s of slots) {
+      if (!s.note.trim()) continue;
+      const ids = parseSeatTelegramIds(s.note);
+      const parts: string[] = [];
+      if (ids.seat1) parts.push(`tg1:${ids.seat1}`);
+      if (ids.seat2) parts.push(`tg2:${ids.seat2}`);
+      const next = parts.join(" | ");
+      if (next === s.note.trim()) continue;
+      s.note = next;
+      await this.writeBookingColumns(s);
+      fixed += 1;
+    }
+    return fixed;
   }
 
   private async applyScheduleStyles(sheetId: number): Promise<void> {
@@ -407,7 +570,7 @@ export class GoogleSheetsService {
                 startRowIndex: 0,
                 endRowIndex: 2000,
                 startColumnIndex: 0,
-                endColumnIndex: 10,
+                endColumnIndex: 12,
               },
               cell: {
                 userEnteredFormat: {
@@ -433,7 +596,7 @@ export class GoogleSheetsService {
                 startRowIndex: 0,
                 endRowIndex: 1,
                 startColumnIndex: 0,
-                endColumnIndex: 10,
+                endColumnIndex: 12,
               },
               cell: {
                 userEnteredFormat: {
@@ -541,13 +704,15 @@ export class GoogleSheetsService {
           name2: s.clientName2,
           phone2: s.clientContact2,
           note: s.note,
+          health1: s.health1,
+          health2: s.health2,
         }),
       );
     }
 
     await sheets.spreadsheets.values.clear({
       spreadsheetId: config.spreadsheetId,
-      range: `'${title}'!A:J`,
+      range: `'${title}'!A:L`,
     });
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
@@ -577,28 +742,34 @@ export class GoogleSheetsService {
   }
 
   private async ensureSheetExists(title: string): Promise<void> {
-    const sheets = await this.getClient();
-    const meta = await sheets.spreadsheets.get({
-      spreadsheetId: config.spreadsheetId,
-      fields: "sheets.properties.title",
-    });
-    const exists = (meta.data.sheets ?? []).some(
-      (s) => s.properties?.title === title,
-    );
-    if (exists) return;
+    const titles = await this.getSheetTitles();
+    if (titles.has(title)) return;
 
+    const sheets = await this.getClient();
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: config.spreadsheetId,
       requestBody: {
         requests: [{ addSheet: { properties: { title } } }],
       },
     });
+    titles.add(title);
+    this.sheetTitlesCache = { at: Date.now(), titles };
   }
 
-  async ensureStructure(): Promise<void> {
+  async ensureStructure(force = false): Promise<void> {
+    const now = Date.now();
+    if (
+      !force &&
+      this.structureReadyAt &&
+      now - this.structureReadyAt < GoogleSheetsService.STRUCTURE_TTL_MS
+    ) {
+      return;
+    }
+
     await this.ensureSheetExists(SHEET_WORKERS);
     await this.ensureSheetExists(SHEET_SERVICES);
     await this.ensureSheetExists(SHEET_SCHEDULE);
+    await this.ensureSheetExists(SHEET_CLIENTS);
 
     const sheets = await this.getClient();
 
@@ -632,10 +803,34 @@ export class GoogleSheetsService {
       });
     }
 
-    // Всегда восстанавливаем правильную шапку Расписания (A–J)
+    const clients = await sheets.spreadsheets.values.get({
+      spreadsheetId: config.spreadsheetId,
+      range: CLIENTS_RANGE,
+    });
+    if (!clients.data.values?.length) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: config.spreadsheetId,
+        range: `'${SHEET_CLIENTS}'!A1:F1`,
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [
+            [
+              "Telegram ID",
+              "Имя",
+              "Телефон",
+              "Username",
+              "Проблемы со здоровьем",
+              "Обновлено",
+            ],
+          ],
+        },
+      });
+    }
+
+    // Шапка Расписания — только при первом ensure / force (не на каждый клик)
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
-      range: `'${SHEET_SCHEDULE}'!A1:J1`,
+      range: `'${SHEET_SCHEDULE}'!A1:L1`,
       valueInputOption: "RAW",
       requestBody: { values: [SCHEDULE_HEADER] },
     });
@@ -646,44 +841,37 @@ export class GoogleSheetsService {
     } catch {
       // ignore style errors on first create
     }
+
+    this.structureReadyAt = Date.now();
   }
 
   /** Очистить все строки расписания кроме шапки (если колонки «поехали») */
   async resetSchedule(): Promise<void> {
-    await this.ensureStructure();
+    await this.ensureStructure(true);
     const sheets = await this.getClient();
-    const meta = await sheets.spreadsheets.get({
+    await sheets.spreadsheets.values.clear({
       spreadsheetId: config.spreadsheetId,
-      fields: "sheets.properties",
+      range: `'${SHEET_SCHEDULE}'!A2:L`,
     });
-    const sheet = (meta.data.sheets ?? []).find(
-      (s) => s.properties?.title === SHEET_SCHEDULE,
-    );
-    const sheetId = sheet?.properties?.sheetId;
-    if (sheetId == null) return;
-
-    const rows = await this.readAllSlots();
-    if (rows.length === 0) return;
-
-    // удаляем строки 2..last (1-based → 0-based index: start 1 end last+1)
-    const lastRow = Math.max(...rows.map((r) => r.rowIndex));
-    await sheets.spreadsheets.batchUpdate({
+    await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            deleteDimension: {
-              range: {
-                sheetId,
-                dimension: "ROWS",
-                startIndex: 1,
-                endIndex: lastRow,
-              },
-            },
-          },
-        ],
-      },
+      range: `'${SHEET_SCHEDULE}'!A1:L1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [SCHEDULE_HEADER] },
     });
+    this.invalidateSlotsCache();
+  }
+
+  /**
+   * Очищает «Расписание» и личные листы тренеров (записи клиентов).
+   * Работники / Услуги / Клиенты не трогает.
+   */
+  async clearScheduleAndBookings(): Promise<void> {
+    await this.resetSchedule();
+    const workers = await this.listWorkers(false);
+    for (const w of workers) {
+      await this.syncTrainerSheet(w.name).catch(console.error);
+    }
   }
 
   /** Демо-данные: 3 работника, 3 услуги, слоты на 7 дней */
@@ -745,15 +933,74 @@ export class GoogleSheetsService {
     );
   }
 
-  async addWorker(name: string, telegram = ""): Promise<Worker> {
+  async addWorker(
+    name: string,
+    telegram = "",
+  ): Promise<Worker & { updated?: boolean }> {
     const n = name.trim();
     if (!n) throw new Error("Имя работника пустое");
-    const existing = await this.listWorkers(false);
-    if (existing.some((w) => w.name.toLowerCase() === n.toLowerCase())) {
-      throw new Error(`Работник «${n}» уже есть`);
-    }
-    await this.ensureStructure();
     const tg = telegram.trim().replace(/^@/, "");
+    const existing = await this.listWorkers(false);
+
+    // Уникальность — по Telegram-тегу
+    if (tg) {
+      const byTg = existing.find(
+        (w) => w.telegram?.toLowerCase() === tg.toLowerCase(),
+      );
+      if (byTg) {
+        if (byTg.name.toLowerCase() === n.toLowerCase()) {
+          // тот же тренер — активируем, если был выключен
+          if (!byTg.active) {
+            const sheets = await this.getClient();
+            await sheets.spreadsheets.values.update({
+              spreadsheetId: config.spreadsheetId,
+              range: cellRange(SHEET_WORKERS, "B", "B", byTg.rowIndex),
+              valueInputOption: "RAW",
+              requestBody: { values: [["да"]] },
+            });
+            byTg.active = true;
+          }
+          return { ...byTg, updated: true };
+        }
+        throw new Error(
+          `Telegram @${tg} уже привязан к тренеру «${byTg.name}».\n` +
+            "Один тег — один тренер.",
+        );
+      }
+    }
+
+    const byName = existing.find(
+      (w) => w.name.toLowerCase() === n.toLowerCase(),
+    );
+    if (byName) {
+      // Имя уже есть — обновляем Telegram-тег (и активируем)
+      if (!tg) {
+        throw new Error(
+          `Тренер «${n}» уже есть.\n` +
+            "Укажите Telegram-тег, чтобы обновить привязку, или выберите другое имя.",
+        );
+      }
+      const sheets = await this.getClient();
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: config.spreadsheetId,
+        range: cellRange(SHEET_WORKERS, "B", "C", byName.rowIndex),
+        valueInputOption: "RAW",
+        requestBody: { values: [["да", tg]] },
+      });
+      const url =
+        byName.sheetUrl || (await this.ensureTrainerSheet(byName.name));
+      await this.syncTrainerSheet(byName.name).catch(console.error);
+      return {
+        rowIndex: byName.rowIndex,
+        name: byName.name,
+        active: true,
+        telegram: tg,
+        sheetUrl: url,
+        updated: true,
+      };
+    }
+
+    await this.ensureStructure();
     const sheets = await this.getClient();
     await sheets.spreadsheets.values.append({
       spreadsheetId: config.spreadsheetId,
@@ -840,7 +1087,16 @@ export class GoogleSheetsService {
     };
   }
 
-  private async readAllSlots(): Promise<Slot[]> {
+  private async readAllSlots(force = false): Promise<Slot[]> {
+    const now = Date.now();
+    if (
+      !force &&
+      this.slotsCache &&
+      now - this.slotsCache.at < GoogleSheetsService.SLOTS_TTL_MS
+    ) {
+      return this.slotsCache.slots.map((s) => ({ ...s }));
+    }
+
     await this.ensureSheetExists(SHEET_SCHEDULE);
     const sheets = await this.getClient();
     const response = await sheets.spreadsheets.values.get({
@@ -860,7 +1116,8 @@ export class GoogleSheetsService {
       const slot = rowToSlot(row, i + 1);
       if (slot) slots.push(slot);
     }
-    return slots;
+    this.slotsCache = { at: now, slots };
+    return slots.map((s) => ({ ...s }));
   }
 
   private findSlot(
@@ -882,7 +1139,7 @@ export class GoogleSheetsService {
 
   private async writeBookingColumns(slot: Slot): Promise<void> {
     const sheets = await this.getClient();
-    const range = cellRange(SHEET_SCHEDULE, "D", "J", slot.rowIndex);
+    const range = cellRange(SHEET_SCHEDULE, "D", "L", slot.rowIndex);
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
       range,
@@ -897,10 +1154,13 @@ export class GoogleSheetsService {
             slot.clientName2,
             slot.clientContact2,
             slot.note,
+            slot.health1,
+            slot.health2,
           ],
         ],
       },
     });
+    this.invalidateSlotsCache();
   }
 
   async getAvailableSlots(options?: {
@@ -908,6 +1168,16 @@ export class GoogleSheetsService {
     worker?: string;
     service?: string;
   }): Promise<Slot[]> {
+    // Не чистим таблицу на каждый клик (дорого по квоте API)
+    const now = Date.now();
+    if (
+      now - this.lastPastCleanupAt >
+      GoogleSheetsService.PAST_CLEANUP_TTL_MS
+    ) {
+      this.lastPastCleanupAt = now;
+      await this.removePastFreeSlots().catch(console.error);
+    }
+
     const daysAhead = options?.daysAhead ?? 7;
     const slots = await this.readAllSlots();
     const from = todayInTimezone();
@@ -918,6 +1188,7 @@ export class GoogleSheetsService {
       .filter((s) => {
         if (s.freeSeats <= 0) return false;
         if (!isDateInRange(s.date, from, to)) return false;
+        if (isSlotInPast(s.date, s.time)) return false;
         if (worker && s.worker.trim().toLowerCase() !== worker) return false;
         return true;
       })
@@ -927,6 +1198,41 @@ export class GoogleSheetsService {
         if (da !== db) return da - db;
         return normalizeTime(a.time).localeCompare(normalizeTime(b.time));
       });
+  }
+
+  /** Удаляет из таблицы прошедшие полностью свободные слоты */
+  async removePastFreeSlots(): Promise<number> {
+    const slots = await this.readAllSlots();
+    const toDelete = slots
+      .filter((s) => s.bookedCount === 0 && isSlotInPast(s.date, s.time))
+      .sort((a, b) => b.rowIndex - a.rowIndex);
+
+    if (toDelete.length === 0) return 0;
+
+    const sheets = await this.getClient();
+    const sheetId = await this.getSheetIdByTitle(SHEET_SCHEDULE);
+    const requests = toDelete.map((s) => ({
+      deleteDimension: {
+        range: {
+          sheetId,
+          dimension: "ROWS" as const,
+          startIndex: s.rowIndex - 1,
+          endIndex: s.rowIndex,
+        },
+      },
+    }));
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: config.spreadsheetId,
+      requestBody: { requests },
+    });
+    this.invalidateSlotsCache();
+
+    const workers = [...new Set(toDelete.map((s) => s.worker).filter(Boolean))];
+    for (const w of workers) {
+      await this.syncTrainerSheet(w).catch(console.error);
+    }
+    return toDelete.length;
   }
 
   async getAvailableDates(worker: string, daysAhead = 7): Promise<string[]> {
@@ -948,6 +1254,7 @@ export class GoogleSheetsService {
     name: string,
     phone: string,
     telegramId?: number,
+    username?: string,
   ): Promise<Slot> {
     const slots = await this.readAllSlots();
     const slot = this.findSlot(slots, date, time, worker);
@@ -960,14 +1267,25 @@ export class GoogleSheetsService {
 
     const n = name.trim();
     const p = phone.trim();
-    const tgTag = telegramId ? `tg:${telegramId}` : "";
 
+    // нельзя занять оба места одним и тем же Telegram-аккаунтом
+    if (telegramId) {
+      const ids = parseSeatTelegramIds(slot.note);
+      const id = String(telegramId);
+      if (ids.seat1 === id || ids.seat2 === id) {
+        throw new Error("Вы уже записаны на этот слот");
+      }
+    }
+
+    let seat: 1 | 2;
     if (!slot.clientName && !slot.clientContact) {
       slot.clientName = n;
       slot.clientContact = p;
+      seat = 1;
     } else if (!slot.clientName2 && !slot.clientContact2) {
       slot.clientName2 = n;
       slot.clientContact2 = p;
+      seat = 2;
     } else {
       throw new SlotAlreadyBookedError(date, time, worker);
     }
@@ -976,14 +1294,22 @@ export class GoogleSheetsService {
       slot.service = service.trim();
     }
 
-    if (tgTag) {
-      const notes = slot.note
-        .split("|")
-        .map((x) => x.trim())
-        .filter(Boolean);
-      if (!notes.includes(tgTag)) notes.push(tgTag);
-      slot.note = notes.join(" | ");
+    slot.note = buildNoteWithSeats(slot.note, seat, telegramId);
+
+    let healthIssues = "";
+    if (telegramId) {
+      const profile = await this.getClientProfile(telegramId);
+      healthIssues = profile?.healthIssues?.trim() || "";
+      await this.upsertClientProfile({
+        telegramId,
+        name: n,
+        phone: p,
+        username: username || undefined,
+        healthIssues,
+      });
     }
+    if (seat === 1) slot.health1 = healthIssues;
+    else slot.health2 = healthIssues;
 
     slot.bookedCount =
       (slot.clientName || slot.clientContact ? 1 : 0) +
@@ -1001,6 +1327,7 @@ export class GoogleSheetsService {
     time: string,
     worker: string,
     contact: string,
+    telegramId?: number,
   ): Promise<Slot> {
     const slots = await this.readAllSlots();
     const slot = this.findSlot(slots, date, time, worker);
@@ -1008,22 +1335,32 @@ export class GoogleSheetsService {
       throw new SlotNotFoundError(date, time, worker);
     }
 
-    const match1 = contactsMatch(slot.clientContact, contact);
-    const match2 = contactsMatch(slot.clientContact2, contact);
+    const ids = parseSeatTelegramIds(slot.note);
+    const id = telegramId ? String(telegramId) : "";
 
-    if (!match1 && !match2) {
+    let seat: 1 | 2 | null = null;
+    if (id && ids.seat1 === id) seat = 1;
+    else if (id && ids.seat2 === id) seat = 2;
+    else if (contactsMatch(slot.clientContact, contact)) seat = 1;
+    else if (contactsMatch(slot.clientContact2, contact)) seat = 2;
+
+    if (!seat) {
       throw new Error("Ваша запись в этом слоте не найдена");
     }
 
-    if (match1) {
+    if (seat === 1) {
       slot.clientName = slot.clientName2;
       slot.clientContact = slot.clientContact2;
+      slot.health1 = slot.health2;
       slot.clientName2 = "";
       slot.clientContact2 = "";
+      slot.health2 = "";
     } else {
       slot.clientName2 = "";
       slot.clientContact2 = "";
+      slot.health2 = "";
     }
+    slot.note = clearSeatFromNote(slot.note, seat);
 
     slot.bookedCount =
       (slot.clientName || slot.clientContact ? 1 : 0) +
@@ -1048,6 +1385,9 @@ export class GoogleSheetsService {
     slot.clientContact = "";
     slot.clientName2 = "";
     slot.clientContact2 = "";
+    slot.note = "";
+    slot.health1 = "";
+    slot.health2 = "";
     slot.bookedCount = 0;
     slot.freeSeats = config.slotCapacity;
     slot.status = STATUS_FREE;
@@ -1107,6 +1447,7 @@ export class GoogleSheetsService {
         ],
       },
     });
+    this.invalidateSlotsCache();
 
     await this.syncTrainerSheet(w).catch(console.error);
 
@@ -1122,6 +1463,8 @@ export class GoogleSheetsService {
       clientName2: "",
       clientContact2: "",
       note: "",
+      health1: "",
+      health2: "",
       bookedCount: 0,
       freeSeats: config.slotCapacity,
     };
@@ -1183,6 +1526,7 @@ export class GoogleSheetsService {
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: rows },
     });
+    this.invalidateSlotsCache();
 
     const names = workerFilter
       ? [workerFilter]
@@ -1239,6 +1583,7 @@ export class GoogleSheetsService {
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: rows },
     });
+    this.invalidateSlotsCache();
     await this.syncTrainerSheet(worker.name).catch(console.error);
     return rows.length;
   }
@@ -1281,6 +1626,7 @@ export class GoogleSheetsService {
         ],
       },
     });
+    this.invalidateSlotsCache();
     await this.syncTrainerSheet(worker).catch(console.error);
   }
 
@@ -1350,73 +1696,68 @@ export class GoogleSheetsService {
     clientName?: string,
     telegramId?: number,
   ): Promise<{ slot: Slot; seat: 1 | 2 } | null> {
-    const slots = await this.readAllSlots();
-    const from = todayInTimezone();
-    const matches: { slot: Slot; seat: 1 | 2 }[] = [];
-    const nameKey = clientName?.trim().toLowerCase();
-    const tgTag = telegramId ? `tg:${telegramId}` : "";
-
-    for (const s of slots) {
-      const parsed = parseSheetDate(s.date);
-      if (!parsed || parsed < from) continue;
-
-      const noteHasTg = tgTag && s.note.includes(tgTag);
-
-      if (
-        contactsMatch(s.clientContact, contact) ||
-        (nameKey && s.clientName.trim().toLowerCase() === nameKey) ||
-        noteHasTg
-      ) {
-        matches.push({ slot: s, seat: 1 });
-      } else if (
-        contactsMatch(s.clientContact2, contact) ||
-        (nameKey && s.clientName2.trim().toLowerCase() === nameKey)
-      ) {
-        matches.push({ slot: s, seat: 2 });
-      }
+    const all = await this.listUserBookings(contact, clientName, telegramId);
+    if (all.length === 0) return null;
+    const first = all[0]!;
+    const ids = parseSeatTelegramIds(first.note);
+    const id = telegramId ? String(telegramId) : "";
+    let seat: 1 | 2 = 1;
+    if (id && ids.seat2 === id) seat = 2;
+    else if (id && ids.seat1 === id) seat = 1;
+    else if (contactsMatch(first.clientContact2, contact)) seat = 2;
+    else if (
+      clientName &&
+      first.clientName2.trim().toLowerCase() === clientName.trim().toLowerCase()
+    ) {
+      seat = 2;
     }
-
-    if (matches.length === 0) return null;
-    matches.sort((a, b) => {
-      const da = parseSheetDate(a.slot.date)?.getTime() ?? 0;
-      const db = parseSheetDate(b.slot.date)?.getTime() ?? 0;
-      if (da !== db) return da - db;
-      return normalizeTime(a.slot.time).localeCompare(
-        normalizeTime(b.slot.time),
-      );
-    });
-    return matches[0] ?? null;
+    return { slot: first, seat };
   }
 
   async listUserBookings(
     contact?: string,
-    clientName?: string,
+    _clientName?: string,
     telegramId?: number,
   ): Promise<Array<Slot & { displayName: string }>> {
     const slots = await this.readAllSlots();
     const from = todayInTimezone();
-    const nameKey = clientName?.trim().toLowerCase();
-    const tgTag = telegramId ? `tg:${telegramId}` : "";
+    const id = telegramId ? String(telegramId) : "";
     const result: Array<Slot & { displayName: string }> = [];
 
     for (const s of slots) {
       const parsed = parseSheetDate(s.date);
       if (!parsed || parsed < from) continue;
+      if (isSlotInPast(s.date, s.time)) continue;
 
-      const noteHasTg = Boolean(tgTag && s.note.includes(tgTag));
+      const ids = parseSeatTelegramIds(s.note);
+      let matched = false;
 
-      const seat1 =
-        (contact && contactsMatch(s.clientContact, contact)) ||
-        (nameKey && s.clientName.trim().toLowerCase() === nameKey) ||
-        noteHasTg;
-      const seat2 =
-        (contact && contactsMatch(s.clientContact2, contact)) ||
-        (nameKey && s.clientName2.trim().toLowerCase() === nameKey);
-
-      if (seat1 && (s.clientName || s.clientContact)) {
+      if (id && ids.seat1 === id && (s.clientName || s.clientContact)) {
         result.push({ ...s, displayName: s.clientName || s.clientContact });
-      } else if (seat2 && (s.clientName2 || s.clientContact2)) {
-        result.push({ ...s, displayName: s.clientName2 || s.clientContact2 });
+        matched = true;
+      }
+      if (id && ids.seat2 === id && (s.clientName2 || s.clientContact2)) {
+        result.push({
+          ...s,
+          displayName: s.clientName2 || s.clientContact2,
+        });
+        matched = true;
+      }
+      if (matched) continue;
+
+      // Запасной путь: телефон/@username этого места (без совпадения по имени)
+      if (contact) {
+        if (contactsMatch(s.clientContact, contact) && (s.clientName || s.clientContact)) {
+          result.push({ ...s, displayName: s.clientName || s.clientContact });
+        } else if (
+          contactsMatch(s.clientContact2, contact) &&
+          (s.clientName2 || s.clientContact2)
+        ) {
+          result.push({
+            ...s,
+            displayName: s.clientName2 || s.clientContact2,
+          });
+        }
       }
     }
 
@@ -1426,6 +1767,180 @@ export class GoogleSheetsService {
       if (da !== db) return da - db;
       return normalizeTime(a.time).localeCompare(normalizeTime(b.time));
     });
+  }
+
+  async getClientProfile(telegramId: number | string): Promise<ClientProfile | null> {
+    const id = String(telegramId);
+    const rows = await this.listClientProfiles();
+    return rows.find((r) => r.telegramId === id) ?? null;
+  }
+
+  private async listClientProfiles(force = false): Promise<ClientProfile[]> {
+    const now = Date.now();
+    if (
+      !force &&
+      this.clientsCache &&
+      now - this.clientsCache.at < GoogleSheetsService.CLIENTS_TTL_MS
+    ) {
+      return this.clientsCache.rows;
+    }
+
+    await this.ensureSheetExists(SHEET_CLIENTS);
+    const sheets = await this.getClient();
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: config.spreadsheetId,
+      range: CLIENTS_RANGE,
+    });
+    const values = response.data.values ?? [];
+    const rows: ClientProfile[] = [];
+    for (let i = 0; i < values.length; i++) {
+      const row = values[i] as string[];
+      if (i === 0 && String(row[0] ?? "").toLowerCase().includes("telegram")) {
+        continue;
+      }
+      const telegramId = String(row[0] ?? "").trim();
+      if (!telegramId) continue;
+      rows.push({
+        rowIndex: i + 1,
+        telegramId,
+        name: fromSheetText(row[1] ?? ""),
+        phone: fromSheetText(row[2] ?? ""),
+        username: fromSheetText(row[3] ?? ""),
+        healthIssues: fromSheetText(row[4] ?? ""),
+        updatedAt: fromSheetText(row[5] ?? ""),
+      });
+    }
+    this.clientsCache = { at: now, rows };
+    return rows;
+  }
+
+  async upsertClientProfile(input: {
+    telegramId: number | string;
+    name?: string;
+    phone?: string;
+    username?: string;
+    healthIssues?: string;
+  }): Promise<ClientProfile> {
+    await this.ensureSheetExists(SHEET_CLIENTS);
+    const id = String(input.telegramId);
+    const existing = await this.getClientProfile(id);
+
+    const nextName = input.name ?? existing?.name ?? "";
+    const nextPhone = input.phone ?? existing?.phone ?? "";
+    const nextUsername = (
+      input.username ??
+      existing?.username ??
+      ""
+    ).replace(/^@/, "");
+    const nextHealth =
+      input.healthIssues !== undefined
+        ? input.healthIssues.trim()
+        : existing?.healthIssues ?? "";
+
+    // Без изменений — не пишем в API
+    if (
+      existing &&
+      existing.name === nextName &&
+      existing.phone === nextPhone &&
+      existing.username === nextUsername &&
+      existing.healthIssues === nextHealth
+    ) {
+      return existing;
+    }
+
+    const now = nowInTimezone();
+    const updatedAt = `${formatDateKey(now)} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+    const next: ClientProfile = {
+      rowIndex: existing?.rowIndex ?? -1,
+      telegramId: id,
+      name: nextName,
+      phone: nextPhone,
+      username: nextUsername,
+      healthIssues: nextHealth,
+      updatedAt,
+    };
+
+    const row = [
+      next.telegramId,
+      next.name,
+      next.phone,
+      next.username,
+      next.healthIssues,
+      next.updatedAt,
+    ];
+
+    const sheets = await this.getClient();
+    if (existing) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: config.spreadsheetId,
+        range: cellRange(SHEET_CLIENTS, "A", "F", existing.rowIndex),
+        valueInputOption: "RAW",
+        requestBody: { values: [row] },
+      });
+      next.rowIndex = existing.rowIndex;
+    } else {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: config.spreadsheetId,
+        range: CLIENTS_RANGE,
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values: [row] },
+      });
+    }
+    this.invalidateClientsCache();
+    return next;
+  }
+
+  async setHealthIssues(
+    telegramId: number | string,
+    healthIssues: string,
+    meta?: { name?: string; phone?: string; username?: string },
+  ): Promise<ClientProfile> {
+    const profile = await this.upsertClientProfile({
+      telegramId,
+      name: meta?.name,
+      phone: meta?.phone,
+      username: meta?.username,
+      healthIssues,
+    });
+    await this.applyHealthToUpcomingBookings(telegramId, profile.healthIssues);
+    return profile;
+  }
+
+  /** Обновляет колонки «Здоровье» во всех будущих записях клиента */
+  async applyHealthToUpcomingBookings(
+    telegramId: number | string,
+    healthIssues: string,
+  ): Promise<number> {
+    const id = String(telegramId);
+    const text = healthIssues.trim();
+    const slots = await this.readAllSlots();
+    const touchedWorkers = new Set<string>();
+    let updated = 0;
+
+    for (const slot of slots) {
+      if (isSlotInPast(slot.date, slot.time)) continue;
+      const ids = parseSeatTelegramIds(slot.note);
+      let changed = false;
+      if (ids.seat1 === id) {
+        slot.health1 = text;
+        changed = true;
+      }
+      if (ids.seat2 === id) {
+        slot.health2 = text;
+        changed = true;
+      }
+      if (!changed) continue;
+      await this.writeBookingColumns(slot);
+      touchedWorkers.add(slot.worker);
+      updated += 1;
+    }
+
+    for (const worker of touchedWorkers) {
+      await this.syncTrainerSheet(worker).catch(console.error);
+    }
+    return updated;
   }
 }
 

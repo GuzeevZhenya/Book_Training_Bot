@@ -29,6 +29,7 @@ cancelHandler.command("cancel", async (ctx) => {
       slot.time,
       slot.worker,
       contactInSheet || contact,
+      tgId,
     );
     await ctx.reply(
       `Запись на ${slot.date} в ${slot.time} (${slot.worker}) отменена.`,
