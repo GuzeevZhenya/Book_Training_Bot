@@ -26,6 +26,14 @@ function initialSession(): SessionData {
   return {};
 }
 
+function getRedis(): Redis | null {
+  const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (!url || !token) return null;
+  return new Redis({ url, token });
+}
+
+/** Upstash сам сериализует JSON — храним объекты как есть. */
 function upstashStorage<T>(redis: Redis): StorageAdapter<T> {
   return {
     read: async (key) => {
@@ -41,36 +49,46 @@ function upstashStorage<T>(redis: Redis): StorageAdapter<T> {
   };
 }
 
-function createSessionMiddleware() {
-  const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+/** Собирает бота с хендлерами (polling и webhook). */
+export function createBot(): Bot<BotContext> {
+  const bot = new Bot<BotContext>(config.botToken);
+  const redis = getRedis();
 
-  if (url && token) {
-    const redis = new Redis({ url, token });
-    return session({
-      initial: initialSession,
-      storage: upstashStorage<SessionData>(redis),
-    });
-  }
-
-  if (process.env.VERCEL) {
+  if (process.env.VERCEL && !redis) {
     throw new Error(
       "На Vercel нужны UPSTASH_REDIS_REST_URL и UPSTASH_REDIS_REST_TOKEN (Upstash Redis).",
     );
   }
 
-  console.warn(
-    "Redis не настроен — сессии в памяти (только для локального npm start).",
+  if (!redis) {
+    console.warn(
+      "Redis не настроен — сессии и диалоги в памяти (только локальный npm start).",
+    );
+  }
+
+  bot.use(
+    session({
+      initial: initialSession,
+      ...(redis ? { storage: upstashStorage<SessionData>(redis) } : {}),
+    }),
   );
-  return session({ initial: initialSession });
-}
 
-/** Собирает бота с хендлерами (polling и webhook). */
-export function createBot(): Bot<BotContext> {
-  const bot = new Bot<BotContext>(config.botToken);
+  // Важно: без storage диалоги записи живут только в RAM и на Vercel ломаются
+  // на втором шаге (каждый webhook = новый процесс).
+  bot.use(
+    conversations(
+      redis
+        ? {
+            storage: {
+              type: "key",
+              prefix: "convo-",
+              adapter: upstashStorage(redis),
+            },
+          }
+        : undefined,
+    ),
+  );
 
-  bot.use(createSessionMiddleware());
-  bot.use(conversations());
   bot.use(createConversation(onboardingWizard, "onboardingWizard"));
   bot.use(createConversation(bookingWizard, "bookingWizard"));
   bot.use(createConversation(healthWizard, "healthWizard"));
