@@ -29,6 +29,7 @@ export default async function handler(
         service: "bot-zapisi",
         missing,
         hasGoogleCredentials: googleOk,
+        hint: "Webhook must stay https://book-training-bot.vercel.app/api/bot",
       });
       return;
     }
@@ -45,28 +46,18 @@ export default async function handler(
       return;
     }
 
+    // Нельзя setWebhook на каждый запрос: VERCEL_URL меняется
+    // и Telegram начинает слать апдейты «в никуда».
+
     const { createBot } = await import("../src/createBot.js");
     const { webhookCallback } = await import("grammy");
 
     const bot = createBot();
+    // Секрет только если реально задан И совпадает с тем, что в setWebhook
     const secretToken = process.env.WEBHOOK_SECRET?.trim() || undefined;
-    const handleUpdate = webhookCallback(bot, "http", { secretToken });
-
-    const explicit = process.env.WEBHOOK_URL?.trim();
-    const vercelHost = process.env.VERCEL_URL?.trim();
-    const base =
-      explicit ||
-      (vercelHost ? `https://${vercelHost}` : "https://book-training-bot.vercel.app");
-    const webhookUrl = `${base.replace(/\/$/, "")}/api/bot`;
-
-    try {
-      await bot.api.setWebhook(
-        webhookUrl,
-        secretToken ? { secret_token: secretToken } : {},
-      );
-    } catch (err) {
-      console.error("setWebhook failed:", err);
-    }
+    const handleUpdate = webhookCallback(bot, "http", {
+      ...(secretToken ? { secretToken } : {}),
+    });
 
     await handleUpdate(req, res);
   } catch (err) {
