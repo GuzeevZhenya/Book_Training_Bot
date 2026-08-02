@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+﻿import { readFileSync } from "node:fs";
 import { google, sheets_v4 } from "googleapis";
 import { config } from "../config.js";
 import {
@@ -18,22 +18,29 @@ const STATUS_BUSY: SlotStatus = "Занято";
 const SHEET_WORKERS = "Работники";
 const SHEET_SERVICES = "Услуги";
 const SHEET_CLIENTS = "Клиенты";
-const SHEET_SCHEDULE = config.sheetName || "Расписание";
+
+function sheetScheduleName(): string {
+  return config.sheetName || "Расписание";
+}
 
 /** Расписание A–L (+ здоровье) */
-const SCHEDULE_RANGE = `'${SHEET_SCHEDULE}'!A:L`;
+function scheduleRange(): string {
+  return `'${sheetScheduleName()}'!A:L`;
+}
 const WORKERS_RANGE = `'${SHEET_WORKERS}'!A:D`;
 const SERVICES_RANGE = `'${SHEET_SERVICES}'!A:D`;
 const CLIENTS_RANGE = `'${SHEET_CLIENTS}'!A:F`;
 
-const RESERVED_SHEETS = new Set([
-  SHEET_SCHEDULE,
-  SHEET_WORKERS,
-  SHEET_SERVICES,
-  SHEET_CLIENTS,
-  "Sheet1",
-  "Лист1",
-]);
+function reservedSheets(): Set<string> {
+  return new Set([
+    sheetScheduleName(),
+    SHEET_WORKERS,
+    SHEET_SERVICES,
+    SHEET_CLIENTS,
+    "Sheet1",
+    "Лист1",
+  ]);
+}
 
 const SCHEDULE_HEADER = [
   "Дата",
@@ -373,7 +380,7 @@ function trainerSheetTitle(workerName: string): string {
     .replace(/\s+/g, " ")
     .slice(0, 90);
   if (!title) title = "Тренер";
-  if (RESERVED_SHEETS.has(title)) {
+  if (reservedSheets().has(title)) {
     title = `Тр ${title}`.slice(0, 90);
   }
   return title;
@@ -485,11 +492,11 @@ export class GoogleSheetsService {
   async repairScheduleDisplay(): Promise<number> {
     await this.ensureStructure();
     const sheets = await this.getClient();
-    const sheetId = await this.getSheetIdByTitle(SHEET_SCHEDULE);
+    const sheetId = await this.getSheetIdByTitle(sheetScheduleName());
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: config.spreadsheetId,
-      range: SCHEDULE_RANGE,
+      range: scheduleRange(),
       valueRenderOption: "UNFORMATTED_VALUE",
     });
     const values = response.data.values ?? [];
@@ -524,12 +531,12 @@ export class GoogleSheetsService {
 
     await sheets.spreadsheets.values.clear({
       spreadsheetId: config.spreadsheetId,
-      range: SCHEDULE_RANGE,
+      range: scheduleRange(),
     });
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
-      range: `'${SHEET_SCHEDULE}'!A1`,
+      range: `'${sheetScheduleName()}'!A1`,
       valueInputOption: "RAW",
       requestBody: { values: out },
     });
@@ -775,7 +782,7 @@ export class GoogleSheetsService {
 
     await this.ensureSheetExists(SHEET_WORKERS);
     await this.ensureSheetExists(SHEET_SERVICES);
-    await this.ensureSheetExists(SHEET_SCHEDULE);
+    await this.ensureSheetExists(sheetScheduleName());
     await this.ensureSheetExists(SHEET_CLIENTS);
 
     const sheets = await this.getClient();
@@ -837,13 +844,13 @@ export class GoogleSheetsService {
     // Шапка Расписания — только при первом ensure / force (не на каждый клик)
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
-      range: `'${SHEET_SCHEDULE}'!A1:L1`,
+      range: `'${sheetScheduleName()}'!A1:L1`,
       valueInputOption: "RAW",
       requestBody: { values: [SCHEDULE_HEADER] },
     });
 
     try {
-      const sheetId = await this.getSheetIdByTitle(SHEET_SCHEDULE);
+      const sheetId = await this.getSheetIdByTitle(sheetScheduleName());
       await this.applyScheduleStyles(sheetId);
     } catch {
       // ignore style errors on first create
@@ -858,11 +865,11 @@ export class GoogleSheetsService {
     const sheets = await this.getClient();
     await sheets.spreadsheets.values.clear({
       spreadsheetId: config.spreadsheetId,
-      range: `'${SHEET_SCHEDULE}'!A2:L`,
+      range: `'${sheetScheduleName()}'!A2:L`,
     });
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
-      range: `'${SHEET_SCHEDULE}'!A1:L1`,
+      range: `'${sheetScheduleName()}'!A1:L1`,
       valueInputOption: "RAW",
       requestBody: { values: [SCHEDULE_HEADER] },
     });
@@ -1104,11 +1111,11 @@ export class GoogleSheetsService {
       return this.slotsCache.slots.map((s) => ({ ...s }));
     }
 
-    await this.ensureSheetExists(SHEET_SCHEDULE);
+    await this.ensureSheetExists(sheetScheduleName());
     const sheets = await this.getClient();
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: config.spreadsheetId,
-      range: SCHEDULE_RANGE,
+      range: scheduleRange(),
       valueRenderOption: "UNFORMATTED_VALUE",
     });
 
@@ -1146,7 +1153,7 @@ export class GoogleSheetsService {
 
   private async writeBookingColumns(slot: Slot): Promise<void> {
     const sheets = await this.getClient();
-    const range = cellRange(SHEET_SCHEDULE, "D", "L", slot.rowIndex);
+    const range = cellRange(sheetScheduleName(), "D", "L", slot.rowIndex);
     await sheets.spreadsheets.values.update({
       spreadsheetId: config.spreadsheetId,
       range,
@@ -1217,7 +1224,7 @@ export class GoogleSheetsService {
     if (toDelete.length === 0) return 0;
 
     const sheets = await this.getClient();
-    const sheetId = await this.getSheetIdByTitle(SHEET_SCHEDULE);
+    const sheetId = await this.getSheetIdByTitle(sheetScheduleName());
     const requests = toDelete.map((s) => ({
       deleteDimension: {
         range: {
@@ -1439,7 +1446,7 @@ export class GoogleSheetsService {
     const sheets = await this.getClient();
     await sheets.spreadsheets.values.append({
       spreadsheetId: config.spreadsheetId,
-      range: SCHEDULE_RANGE,
+      range: scheduleRange(),
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: {
@@ -1528,7 +1535,7 @@ export class GoogleSheetsService {
     const sheets = await this.getClient();
     await sheets.spreadsheets.values.append({
       spreadsheetId: config.spreadsheetId,
-      range: SCHEDULE_RANGE,
+      range: scheduleRange(),
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: rows },
@@ -1585,7 +1592,7 @@ export class GoogleSheetsService {
     const sheets = await this.getClient();
     await sheets.spreadsheets.values.append({
       spreadsheetId: config.spreadsheetId,
-      range: SCHEDULE_RANGE,
+      range: scheduleRange(),
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: rows },
@@ -1611,7 +1618,7 @@ export class GoogleSheetsService {
       fields: "sheets.properties",
     });
     const sheet = (meta.data.sheets ?? []).find(
-      (s) => s.properties?.title === SHEET_SCHEDULE,
+      (s) => s.properties?.title === sheetScheduleName(),
     );
     const sheetId = sheet?.properties?.sheetId;
     if (sheetId == null) throw new Error("Лист Расписание не найден");
