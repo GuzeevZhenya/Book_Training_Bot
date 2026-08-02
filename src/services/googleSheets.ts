@@ -419,12 +419,19 @@ export class GoogleSheetsService {
     this.clientsCache = null;
   }
 
+  private loadCredentials(): object {
+    if (config.googleCredentialsJson) {
+      return JSON.parse(config.googleCredentialsJson) as object;
+    }
+    return JSON.parse(
+      readFileSync(config.googleCredentialsPath, "utf-8"),
+    ) as object;
+  }
+
   private async getClient(): Promise<sheets_v4.Sheets> {
     if (this.sheets) return this.sheets;
 
-    const credentials = JSON.parse(
-      readFileSync(config.googleCredentialsPath, "utf-8"),
-    );
+    const credentials = this.loadCredentials();
 
     const auth = new google.auth.GoogleAuth({
       credentials,

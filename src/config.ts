@@ -47,6 +47,8 @@ export const config = {
   adminUsernames,
   spreadsheetId: requireEnv("SPREADSHEET_ID"),
   sheetName: process.env.SHEET_NAME?.trim() || "Расписание",
+  /** JSON service account целиком (для Railway / облака) */
+  googleCredentialsJson: process.env.GOOGLE_CREDENTIALS_JSON?.trim() || null,
   googleCredentialsPath: resolve(
     process.cwd(),
     process.env.GOOGLE_CREDENTIALS_PATH?.trim() ||

@@ -96,7 +96,35 @@ npm start
 npm run dev
 ```
 
-**Важно:** запускайте только **один** экземпляр бота (иначе Telegram 409 Conflict).
+**Важно:** запускайте только **один** экземпляр бота (иначе Telegram 409 Conflict). Локальный `npm start` и Vercel webhook одновременно не запускайте.
+
+## Деплой на Vercel (webhook)
+
+1. Создайте бесплатный Redis: [Upstash](https://upstash.com/) → Redis → REST URL + TOKEN  
+2. Vercel → New Project → репозиторий `Book_Training_Bot`  
+3. Environment Variables:
+
+```env
+BOT_TOKEN=
+ADMIN_ID=
+ADMIN_USERNAMES=
+SPREADSHEET_ID=
+SHEET_NAME=Расписание
+GOOGLE_CREDENTIALS_JSON={"type":"service_account",...}
+TIMEZONE=Europe/Moscow
+UPSTASH_REDIS_REST_URL=
+UPSTASH_REDIS_REST_TOKEN=
+WEBHOOK_SECRET=любая-длинная-строка
+```
+
+4. Deploy → скопируйте URL проекта  
+5. Установите webhook (локально из папки проекта):
+
+```bash
+npm run webhook -- https://YOUR-PROJECT.vercel.app/api/bot
+```
+
+Проверка: откройте `https://YOUR-PROJECT.vercel.app/api/bot` — должен быть `{"ok":true,...}`. Напишите боту `/start` в Telegram.
 
 ## Скрипты обслуживания
 
@@ -132,14 +160,16 @@ npx tsx scripts/fix-bookings.ts         # починить привязки за
 ## Структура проекта
 
 ```text
+api/bot.ts      # Vercel webhook
 src/
-  main.ts
+  main.ts       # локальный long polling
+  createBot.ts
   config.ts
-  handlers/     # start, booking, cancel, admin
+  handlers/
   keyboards/
   services/googleSheets.ts
   middlewares/
-scripts/        # clear / repair / sync
+scripts/        # webhook / clear / repair / sync
 ```
 
 ## Важно
