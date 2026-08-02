@@ -21,6 +21,7 @@ import {
 import { adminMenuKeyboard } from "../keyboards/admin.js";
 import { SlotAlreadyBookedError, SlotNotFoundError } from "../types.js";
 import { loadClientSession } from "./start.js";
+import { waitCallbackData, waitTextMessage } from "../conversationWait.js";
 
 function isQuotaError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -277,7 +278,7 @@ export async function bookingWizard(
   let doneSelecting = false;
 
   while (!doneSelecting) {
-    const cbCtx = await conversation.waitFor("callback_query:data");
+    const cbCtx = await waitCallbackData(conversation);
     const data = cbCtx.callbackQuery.data;
     await cbCtx.answerCallbackQuery();
 
@@ -577,7 +578,7 @@ export async function healthWizard(
   );
 
   while (true) {
-    const cbCtx = await conversation.waitFor("callback_query:data");
+    const cbCtx = await waitCallbackData(conversation);
     const data = cbCtx.callbackQuery.data;
     await cbCtx.answerCallbackQuery();
 
@@ -606,7 +607,7 @@ export async function healthWizard(
         "Напишите проблемы одним сообщением.\n" +
           "Чтобы очистить — отправьте «-».",
       );
-      const msgCtx = await conversation.waitFor("message:text");
+      const msgCtx = await waitTextMessage(conversation);
       const raw = msgCtx.message.text.trim();
       const issues =
         raw === "-" || raw.toLowerCase() === "очистить" ? "" : raw;

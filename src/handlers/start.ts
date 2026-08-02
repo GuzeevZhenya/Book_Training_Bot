@@ -3,6 +3,7 @@ import type { BotContext, BotConversation } from "../context.js";
 import { googleSheets } from "../services/googleSheets.js";
 import { isAdmin } from "../middlewares/adminOnly.js";
 import { clientMainKeyboard } from "../keyboards/client.js";
+import { waitTextMessage } from "../conversationWait.js";
 
 export const startHandler = new Composer<BotContext>();
 
@@ -112,7 +113,7 @@ export async function onboardingWizard(
       "Как вас зовут?",
   );
 
-  const nameCtx = await conversation.waitFor("message:text");
+  const nameCtx = await waitTextMessage(conversation);
   const name = nameCtx.message.text.trim();
   if (!name) {
     await ctx.reply("Имя пустое. Нажмите /start ещё раз.");
@@ -127,7 +128,7 @@ export async function onboardingWizard(
       "Напишите текстом (например: боли в спине) или отправьте «-», чтобы пропустить.",
   );
 
-  const healthCtx = await conversation.waitFor("message:text");
+  const healthCtx = await waitTextMessage(conversation);
   const raw = healthCtx.message.text.trim();
   const health =
     raw === "-" ||

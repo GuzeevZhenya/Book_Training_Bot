@@ -81,6 +81,8 @@ export function createBot(): Bot<BotContext> {
         ? {
             storage: {
               type: "key",
+              // bump при смене логики диалогов — сбрасывает зависшие записи в Redis
+              version: 2,
               prefix: "convo-",
               adapter: upstashStorage(redis),
             },
