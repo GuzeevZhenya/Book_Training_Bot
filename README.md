@@ -157,21 +157,6 @@ npx tsx scripts/fix-bookings.ts         # починить привязки за
 | 🛠 Админ-панель | Тренеры, услуги, слоты, очистка, демо |
 | 👥 Клиенты: Имя | Записи привязанного тренера |
 
-## Структура проекта
-
-```text
-api/bot.ts      # Vercel webhook
-src/
-  main.ts       # локальный long polling
-  createBot.ts
-  config.ts
-  handlers/
-  keyboards/
-  services/googleSheets.ts
-  middlewares/
-scripts/        # webhook / clear / repair / sync
-```
-
 ## Важно
 
 - Не коммитьте `.env` и JSON ключи service account.
